@@ -116,9 +116,12 @@ $$
         table_oid record;
         shadow_schema_name text;
         pk_col_clause text;
+        lowercase_tablename text;
+        comparison_cols text = '';
     begin
         /* Done similarly to create_shadow_table. */
         shadow_schema_name = 'shadow_'||_schema;
+        lowercase_tablename = lower(tablename);
         -- Fetch the table OID.
         SELECT c.oid
           FROM pg_catalog.pg_class c
@@ -133,15 +136,20 @@ $$
         -- create_shadow_table).
         SELECT array_to_string(array_agg(quote_ident(a.attname)), ', '),
                array_to_string(array_agg('new.'||quote_ident(a.attname)), ', '),
-               array_to_string(array_agg(quote_ident(a.attname)|| ' = new.'||quote_ident(a.attname)), ', ')
+               array_to_string(array_agg(quote_ident(a.attname)|| ' = new.'||quote_ident(a.attname)), ', '),
+               array_to_string(array_agg(
+                   CASE 
+                       WHEN a.attname != 'updatedAt' 
+                       THEN 'new.'||quote_ident(a.attname)||' IS NOT DISTINCT FROM old.'||quote_ident(a.attname)
+                   END), ' AND ')
           FROM (select a.attname
                   from pg_catalog.pg_attribute a
                  WHERE a.attrelid = table_oid.oid 
                    AND a.attnum > 0 AND NOT a.attisdropped
                  ORDER BY a.attnum) a 
-                  INTO insert_cols, valuesclause, updatecols;
+                  INTO insert_cols, valuesclause, updatecols, comparison_cols;
          -- Insert trigger function.
-         execute 'CREATE OR REPLACE FUNCTION '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_'||tablename||'_add')||E'() returns trigger as $_$\n'||
+         execute 'CREATE OR REPLACE FUNCTION '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_'||lowercase_tablename||'_add')||E'() returns trigger as $_$\n'||
                  E' DECLARE\n'||
                  E' BEGIN\n'||
                  '  INSERT INTO '||quote_ident(shadow_schema_name)||'.'||quote_ident('__shadow_'||tablename)||'('||insert_cols||') VALUES ('||valuesclause||E');\n'||
@@ -151,7 +159,7 @@ $$
                  'LANGUAGE PLPGSQL SECURITY DEFINER VOLATILE;';
          execute 'drop trigger if exists '||quote_ident(tablename||'_on_add_trg')||' ON '||quote_ident(_schema)||'.'||quote_ident(tablename);
          execute 'create trigger '||quote_ident(tablename||'_on_add_trg')||' AFTER INSERT ON '||quote_ident(_schema)||'.'||quote_ident(tablename)||
-                 ' for each row execute procedure '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_')||tablename||'_add'||'();';
+                 ' for each row execute procedure '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_'||lowercase_tablename||'_add')||'();';
          -- UPDATE & DELETE triggers
          select array_to_string(array_agg(quote_ident(column_name)||' = old.'||quote_ident(column_name)), ' AND ')
           from (
@@ -165,11 +173,11 @@ $$
                      and tc.constraint_type = 'PRIMARY KEY'
                order by ordinal_position) tmp
           into pk_col_clause;
-         execute 'CREATE OR REPLACE FUNCTION '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_'||tablename||'_mod')||E'() returns trigger as $_$\n'||
+         execute 'CREATE OR REPLACE FUNCTION '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_'||lowercase_tablename||'_mod')||E'() returns trigger as $_$\n'||
                  E' DECLARE\n'||
                  E'  last_ts timestamptz;\n'||
                  E' BEGIN\n'||
-                 E'  IF TG_OP = \'UPDATE\' AND new IS NOT DISTINCT FROM old THEN\n'||
+                 E'  IF TG_OP = \'UPDATE\' AND '||comparison_cols||E' THEN\n'||
                  E'      RETURN NEW;\n'||
                  E'  END IF;\n'||
                  E'  SELECT __insert_ts FROM '||quote_ident(shadow_schema_name)||'.'||quote_ident('__shadow_'||tablename)||
@@ -197,7 +205,7 @@ $$
                  'LANGUAGE PLPGSQL SECURITY DEFINER VOLATILE;';
          execute 'drop trigger if exists '||quote_ident(tablename||'_on_mod_trg')||' ON '||quote_ident(_schema)||'.'||quote_ident(tablename);
          execute 'create trigger '||quote_ident(tablename||'_on_mod_trg')||' AFTER UPDATE OR DELETE ON '||quote_ident(_schema)||'.'||quote_ident(tablename)||
-                 ' for each row execute procedure '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_')||tablename||'_mod'||'();';        
+                 ' for each row execute procedure '||quote_ident(shadow_schema_name)||'.'||quote_ident('__trg_on_'||lowercase_tablename||'_mod')||'();';        
     end 
 $$
 language plpgsql security definer volatile set client_min_messages = warning;
